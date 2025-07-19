@@ -11,6 +11,8 @@ from tokenizers.trainers import WordLevelTrainer
 from tokenizers.pre_tokenizers import Whitespace
 from torch.utils.tensorboard import SummaryWriter
 from config import get_weights_file_path, get_config
+from tqdm import tqdm
+import warnings
 
 def get_all_sentences(ds, lang):
     for item in ds:
@@ -83,3 +85,44 @@ def train_model(config):
         initial_epoch = state['epoch'] + 1
         optimizer.load_state_dict(state['optimizer_state_dict'])
         global_step = state['global_step']
+        
+    loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_tgt.token_to_id('[PAD]'), label_smoothing=0.1).to(device)
+
+    for epoch in range(initial_epoch, config['num_epochs']):
+        model.train()
+        batch_iterator = tqdm(train_dataloader, desc=f'Epoch {epoch + 1}/{config["num_epochs"]}', unit='batch')
+        for batch in batch_iterator:
+            encoder_input = batch['encoder_input'].to(device)
+            decoder_input = batch['decoder_input'].to(device)
+            encoder_mask = batch['encoder_mask'].to(device)
+            decoder_mask = batch['decoder_mask'].to(device)
+
+            encoder_output = model.encode(encoder_input, encoder_mask)
+            decoder_output = model.decode(encoder_output, encoder_mask, decoder_input, decoder_mask)
+            proj_output = model.project(decoder_output)
+
+            label = batch['label'].to(device)
+            loss = loss_fn(proj_output.view(-1, tokenizer_tgt.get_vocab_size()), label.view(-1))
+            batch_iterator.set_postfix(loss=f"{loss.item():6.3f}")
+
+            writer.add_scalar('train loss', loss.item(), global_step)
+            writer.flush()
+
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+            global_step += 1
+
+        model_filename = get_weights_file_path(config, epoch + 1)
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'global_step': global_step
+        }, model_filename)
+
+if __name__ == '__main__':
+    warnings.filterwarnings("ignore")
+    config = get_config()
+    train_model(config)
